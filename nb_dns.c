@@ -124,6 +124,7 @@ struct nb_dns_info *
 nb_dns_init(char *errstr)
 {
 	register struct nb_dns_info *nd;
+	res_state res = malloc(sizeof(struct __res_state));
 
 	nd = (struct nb_dns_info *)malloc(sizeof(*nd));
 	if (nd == NULL) {
@@ -137,13 +138,14 @@ nb_dns_init(char *errstr)
 	/* XXX should be able to init static hostent struct some other way */
 	(void)gethostbyname("localhost");
 
-	if ((_res.options & RES_INIT) == 0 && res_init() == -1) {
-		snprintf(errstr, NB_DNS_ERRSIZE, "res_init() failed");
+	res->options &= ~ RES_INIT;
+	if (res_ninit(res) == -1) {
+		snprintf(errstr, NB_DNS_ERRSIZE, "res_ninit() failed");
 		free(nd);
 		return (NULL);
 	}
 
-	if ( _res.nscount == 0 )
+	if ( res->nscount == 0 )
 		{
 		// Really?  Let's try parsing resolv.conf ourselves to see what's
 		// there.  (e.g. musl libc has res_init() that doesn't actually
@@ -226,21 +228,25 @@ nb_dns_init(char *errstr)
 		}
 
 	int i;
-
-	for ( i = 0; i < _res.nscount; ++i )
+	int i_v6=0; // res->_u._ext.nsaddrs[] has a different index
+	for ( i = 0; i < res->nscount; ++i )
 		{
-		memcpy(&nd->server, &_res.nsaddr_list[i], sizeof(struct sockaddr_in));
-		/* XXX support IPv6 */
-		if ( nd->server.ss_family != AF_INET )
-			continue;
-
-		nd->s = socket(nd->server.ss_family, SOCK_DGRAM, 0);
+		if(res->nsaddr_list[i].sin_family == AF_INET){
+			memcpy(&nd->server, &res->nsaddr_list[i], sizeof(struct sockaddr_in));
+			nd->s = socket(AF_INET, SOCK_DGRAM, 0);
+		}else{
+			// sin_family will equal 0 if it's not ipv4, as opposed to AF_INET6 (10).
+			memcpy(&nd->server, res->_u._ext.nsaddrs[i_v6], sizeof(struct sockaddr_in6));
+			i_v6++;
+                        nd->s = socket(AF_INET6, SOCK_DGRAM, 0);
+		}
 
 		if ( nd->s < 0 )
 			{
 			snprintf(errstr, NB_DNS_ERRSIZE, "socket(): %s",
 			         my_strerror(errno));
 			free(nd);
+			res_nclose(res);
 			return (NULL);
 			}
 
@@ -255,14 +261,16 @@ nb_dns_init(char *errstr)
 			         my_strerror(errno));
 			close(nd->s);
 			free(nd);
+			res_nclose(res);
 			return (NULL);
 			}
-
+		res_nclose(res);
 		return (nd);
 		}
 
 	snprintf(errstr, NB_DNS_ERRSIZE, "no valid nameservers in resolver config");
 	free(nd);
+	res_nclose(res);
 	return (NULL);
 }
 
